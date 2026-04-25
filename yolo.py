@@ -1,19 +1,43 @@
 from pathlib import Path
 from typing import Union
 
-import torch
-from ultralytics import YOLO
-
 import numpy
+import torch
 from asm.api.ai import ASMAI, AIResult, AIExpansion
 from asm.api.base import ModuleTask, ModuleTaskInput, ModuleTaskOutput, ModuleConfiguration, ModuleInformation, \
-    ContainerParameterResults, ModuleRequirement
+    ContainerParameterResults, ModuleRequirement, ModuleTaskInputPattern, ModuleTaskData, \
+    ContainerParameter, ContainerParameterType, ContainerParameterGroup
+from ultralytics import YOLO
+
+calibrate_task = ModuleTask(
+    name="calibrate",
+    task_input=ModuleTaskInputPattern(
+        data=[ModuleTaskData.FRAME],
+        user_input={
+            "w_real_scale": 0,
+            "h_real_scale": 0
+        }
+    )
+)
+scale_group: ContainerParameterGroup = ContainerParameterGroup(
+    "Scale",
+    ContainerParameterType.RANGE
+)
+parameters: list[ContainerParameter] = [
+    ContainerParameter(name="W", group=scale_group),
+    ContainerParameter(name="H", group=scale_group)
+]
 
 
 class YOLOai(ASMAI):
     model = None
     current_labels = None
     name = ""
+
+    config = ModuleConfiguration({
+        "w_calibrated_value": 0,
+        "h_calibrated_value": 0
+    })
 
     def expansions(self) -> AIExpansion:
         return AIExpansion(["pt", "onnx"])
@@ -28,9 +52,15 @@ class YOLOai(ASMAI):
 
         results = self.model.predict(source=frame, conf=0.25, verbose=False)
 
-        label = self.current_labels[int(results[0].boxes.cls[0].item())]
+        if len(results) == 0 or len(results[0].boxes) == 0:
+            return None, None
 
-        return AIResult(self.name, label), None
+        label = self.current_labels[int(results[0].boxes.cls[0].item())]
+        box = results[0].boxes[0]
+        w = box.xywh[0][2].item()
+        h = box.xywh[0][3].item()
+
+        return AIResult(self.name, label), [ContainerParameterResults(parameters[0], w), ContainerParameterResults(parameters[1], h)]
 
     def load(self, model_path: Path, labels_path: Union[Path, None]) -> bool:
         self.name = model_path.name
@@ -39,7 +69,7 @@ class YOLOai(ASMAI):
             self.current_labels = list(self.model.names.values())
 
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     def unload(self) -> None:
@@ -51,18 +81,38 @@ class YOLOai(ASMAI):
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-
     def module_info(self) -> ModuleInformation:
         return ModuleInformation(
             name="YOLO",
             version="1.0",
             requirements=[
                 ModuleRequirement("torch"), ModuleRequirement("ultralytics")
-            ]
+            ],
+            parameters=parameters,
+            tasks=[calibrate_task],
+            configuration_pattern=self.config
         )
 
     def configuration(self, configuration: ModuleConfiguration):
-        pass
+        self.config.configuration.update(configuration.configuration)
 
     def task(self, task: ModuleTask, task_input: ModuleTaskInput) -> Union[ModuleTaskOutput, None]:
-        pass
+        if task.name == calibrate_task.name:
+            frame: numpy.ndarray = task_input.data[0]
+            w_real_scale: float = task_input.task_input["w_real_scale"]
+            h_real_scale: float = task_input.task_input["h_real_scale"]
+
+            if self.model is not None:
+                self.config.configuration["calibrated_value"] = 1.0
+                ai_result, parameters_result = self.process(frame=frame)
+
+                w_pixels = parameters_result[0].result
+                h_pixels = parameters_result[1].result
+
+                result = {
+                    "w_calibrated_value": w_pixels // w_real_scale,
+                    "h_calibrated_value": h_pixels // h_real_scale
+                }
+
+                return ModuleTaskOutput(task_output=task.task_output, update_configuration=result)
+        return None
