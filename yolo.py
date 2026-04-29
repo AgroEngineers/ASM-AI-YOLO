@@ -3,6 +3,7 @@ from typing import Union
 
 import numpy
 import torch
+from asm import logman
 from asm.api.ai import ASMAI, AIResult, AIExpansion
 from asm.api.base import ModuleTask, ModuleTaskInput, ModuleTaskOutput, ModuleConfiguration, ModuleInformation, \
     ContainerParameterResults, ModuleRequirement, ModuleTaskInputPattern, ModuleTaskData, \
@@ -51,10 +52,8 @@ class YOLOai(ASMAI):
             raise ModuleNotFoundError()
 
         results = self.model.predict(source=frame, conf=0.25, verbose=False)
-
         if len(results) == 0 or len(results[0].boxes) == 0:
             return None, None
-
         label = self.current_labels[int(results[0].boxes.cls[0].item())]
         box = results[0].boxes[0]
         w = box.xywh[0][2].item()
@@ -65,9 +64,9 @@ class YOLOai(ASMAI):
     def load(self, model_path: Path, labels_path: Union[Path, None]) -> bool:
         self.name = model_path.name
         try:
-            self.model = YOLO(str(model_path))
+            self.model = YOLO(str(model_path.absolute()))
             self.current_labels = list(self.model.names.values())
-
+            import inspect
             return True
         except Exception:
             return False
